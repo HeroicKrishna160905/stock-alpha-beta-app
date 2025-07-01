@@ -44,8 +44,8 @@ if st.button("Run Analysis"):
         beta = reg.coef_[0]
         alpha = reg.intercept_
 
-        st.write(f"#### Regression Equation:
-**{ticker} returns = {beta:.4f} * (S&P 500 returns) + {alpha:.4f}**")
+        st.write(f"#### Regression Equation:\\n**{ticker} returns = {beta:.4f} * (S&P 500 returns) + {alpha:.4f}**")
+
 
         rolling_betas, rolling_alphas, rolling_dates = [], [], []
         for i in range(window, len(returns_df) + 1):
