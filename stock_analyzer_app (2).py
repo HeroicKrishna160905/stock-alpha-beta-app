@@ -9,111 +9,104 @@ from scipy import stats
 st.set_page_config(layout="wide")
 st.title("📈 Stock Alpha-Beta Analyzer + Monte Carlo Simulation")
 
-# User Inputs
-ticker = st.text_input("Enter Stock Ticker (e.g., AAPL, MSFT, TSLA):", value="AAPL").upper()
-period = st.selectbox("Select Data Period:", options=["6mo", "1y", "2y", "5y", "10y"], index=1)
-window = st.slider("Rolling Window Size (Days):", min_value=10, max_value=60, value=20)
-simulate = st.checkbox("Run Monte Carlo Simulation using Alpha")
+# --- ANALYSIS FORM ---
+with st.form("analysis_form"):
+    st.subheader("1) Analysis Parameters")
+    ticker = st.text_input("Ticker (e.g., AAPL)", "AAPL").upper()
+    period = st.selectbox("Data Period", ["6mo", "1y", "2y", "5y", "10y"], index=1)
+    window = st.slider("Rolling Window Size (Days)", 10, 60, 20)
+    run_analysis = st.form_submit_button("Run Analysis")
 
-if st.button("Run Analysis"):
-    st.write(f"### Analysis for: {ticker} over {period}")
-    data = yf.download(ticker, period=period)
-    if data.empty:
-        st.error("No data found for the ticker.")
-    else:
-        # Calculate returns & summary
-        data['Daily Return'] = data['Close'].pct_change()
-        data['Cumulative Return'] = (1 + data['Daily Return']).cumprod()
-        st.write("#### Summary Statistics:")
-        st.dataframe(data['Daily Return'].describe())
-        st.metric("Cumulative Return (Last Day)", f"{data['Cumulative Return'].iloc[-1]:.4f}")
+@st.cache_data(show_spinner=False)
+def compute_analysis(ticker, period, window):
+    # Download & compute returns
+    df = yf.download(ticker, period=period)
+    df["Daily Return"] = df["Close"].pct_change()
+    df["Cumulative Return"] = (1 + df["Daily Return"]).cumprod()
 
-        # Benchmark
-        sp500 = yf.download("^GSPC", start=data.index.min(), end=data.index.max())
-        sp500['Daily Return'] = sp500['Close'].pct_change()
+    sp = yf.download("^GSPC", start=df.index.min(), end=df.index.max())
+    sp["Daily Return"] = sp["Close"].pct_change()
 
-        # Align returns
-        returns_df = pd.DataFrame({
-            ticker: data['Daily Return'].values,
-            'SP500': sp500['Daily Return'].reindex(data.index).values
-        }, index=data.index).dropna()
+    returns = pd.DataFrame({
+        "Stock": df["Daily Return"],
+        "SP500": sp["Daily Return"].reindex(df.index)
+    }).dropna()
 
-        # Alpha & Beta regression
-        X, y = returns_df[['SP500']].values, returns_df[ticker].values
-        reg = LinearRegression().fit(X, y)
-        beta, alpha = reg.coef_[0], reg.intercept_
-        st.write(f"#### Regression Equation:\n**{ticker} returns = {beta:.4f} × S&P 500 returns + {alpha:.4f}**")
+    # Global regression
+    X, y = returns[["SP500"]], returns["Stock"]
+    reg = LinearRegression().fit(X, y)
+    alpha, beta = reg.intercept_, reg.coef_[0]
 
-        # Rolling regression
-        rolling_betas, rolling_alphas, rolling_dates = [], [], []
-        for i in range(window, len(returns_df) + 1):
-            sub = returns_df.iloc[i - window:i]
-            r = LinearRegression().fit(sub[['SP500']], sub[ticker])
-            rolling_betas.append(r.coef_[0])
-            rolling_alphas.append(r.intercept_)
-            rolling_dates.append(sub.index[-1])
+    # Rolling regression
+    dates, rolling_alphas, rolling_betas = [], [], []
+    for i in range(window, len(returns) + 1):
+        sub = returns.iloc[i - window : i]
+        r = LinearRegression().fit(sub[["SP500"]], sub["Stock"])
+        rolling_alphas.append(r.intercept_)
+        rolling_betas.append(r.coef_[0])
+        dates.append(sub.index[-1])
 
-        # Plot rolling Beta & Alpha
-        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 6))
-        ax1.plot(rolling_dates, rolling_betas, label=f'Rolling Beta ({window}d)')
-        ax1.set_title(f'{window}-Day Rolling Beta'); ax1.grid(True); ax1.legend()
-        ax2.plot(rolling_dates, rolling_alphas, color='orange', label=f'Rolling Alpha ({window}d)')
-        ax2.set_title(f'{window}-Day Rolling Alpha'); ax2.grid(True); ax2.legend()
-        st.pyplot(fig)
+    return df, returns, alpha, beta, dates, rolling_alphas, rolling_betas
 
-        # Summary stats & tests
-        rb, ra = np.array(rolling_betas), np.array(rolling_alphas)
-        st.write("#### Rolling Coeff Stats")
-        c1, c2 = st.columns(2)
-        c1.metric("Beta Mean", f"{rb.mean():.4f}"); c1.metric("Beta Std", f"{rb.std():.4f}")
-        c2.metric("Alpha Mean", f"{ra.mean():.4f}"); c2.metric("Alpha Std", f"{ra.std():.4f}")
+if run_analysis:
+    df, returns, alpha, beta, dates, rolling_alphas, rolling_betas = compute_analysis(ticker, period, window)
 
-        sh_b, sh_a = stats.shapiro(rb), stats.shapiro(ra)
-        t_b, t_a = stats.ttest_1samp(rb, 0), stats.ttest_1samp(ra, 0)
-        def runs_test(x):
-            med = np.median(x); runs = n1 = n2 = 0; prev = None
-            for xi in x:
-                cur = 1 if xi >= med else 0
-                n1 += cur; n2 += (cur == 0)
-                if prev is None or cur != prev: runs += 1
-                prev = cur
-            exp = (2 * n1 * n2) / (n1 + n2) + 1 if n1 + n2 > 0 else 0
-            std = np.sqrt((2 * n1 * n2 * (2 * n1 * n2 - n1 - n2)) / (((n1 + n2) ** 2) * (n1 + n2 - 1))) if n1 + n2 - 1 > 0 else 0
-            z = (runs - exp) / std if std > 0 else 0; p = 2 * (1 - stats.norm.cdf(abs(z)))
-            return runs, exp, z, p
-        rt_b, rt_a = runs_test(rb), runs_test(ra)
+    # Display basic stats
+    st.subheader("Analysis Results")
+    st.write(f"**Regression:** {ticker} = {beta:.4f} × SP500 + {alpha:.4f}")
+    st.write("Daily Return Stats:")
+    st.dataframe(df["Daily Return"].describe())
+    st.metric("Cumulative Return", f"{df['Cumulative Return'].iloc[-1]:.4f}")
 
-        st.write("#### Statistical Tests")
-        st.write(f"- **Shapiro-Wilk**: Beta p={sh_b.pvalue:.4f}, Alpha p={sh_a.pvalue:.4f}")
-        st.write(f"- **T-test**: Beta p={t_b.pvalue:.4f}, Alpha p={t_a.pvalue:.4f}")
-        st.write(f"- **Runs Test**: Beta z={rt_b[2]:.2f}, p={rt_b[3]:.4f}; Alpha z={rt_a[2]:.2f}, p={rt_a[3]:.4f}")
+    # Rolling plots
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 6))
+    ax1.plot(dates, rolling_betas, label="Beta"); ax1.set_title("Rolling Beta"); ax1.legend(); ax1.grid(True)
+    ax2.plot(dates, rolling_alphas, color="orange", label="Alpha"); ax2.set_title("Rolling Alpha"); ax2.legend(); ax2.grid(True)
+    st.pyplot(fig)
 
-        # Monte Carlo Simulation
-        if simulate:
-            st.subheader("🔁 Monte Carlo on Alpha")
-            num_simulations = st.number_input("Number of Simulations", min_value=10, max_value=2000, value=100, step=10)
-            sim_steps = st.slider("Simulation Length (Number of Windows)", min_value=1, max_value=60, value=10)
-            initial = st.number_input("Initial Investment ($)", value=1000)
+    # Store rolling alphas in session state for simulation
+    st.session_state["rolling_alphas"] = rolling_alphas
+    st.session_state["window"] = window
 
-            ap_mean, ap_std = ra.mean(), ra.std()
-            paths = np.zeros((num_simulations, sim_steps + 1))
-            for i in range(num_simulations):
-                sims_alpha = np.random.normal(ap_mean, ap_std, sim_steps)
-                p = [initial]
-                for a in sims_alpha:
-                    p.append(p[-1] * (1 + a) ** window)
-                paths[i] = p
+# --- SIMULATION FORM ---
+if "rolling_alphas" in st.session_state:
+    with st.form("sim_form"):
+        st.subheader("2) Monte Carlo Parameters")
+        num_simulations = st.number_input("Number of Simulations", 10, 2000, 100, step=10)
+        sim_steps = st.slider("Simulation Length (Number of Windows)", 1, 60, 10)
+        initial = st.number_input("Initial Investment ($)", 1000)
+        run_sim = st.form_submit_button("Run Simulation")
 
-            mean_p = paths.mean(axis=0); std_p = paths.std(axis=0)
-            fig2, ax2 = plt.subplots(figsize=(12, 6))
-            for r in paths: ax2.plot(r, color='gray', alpha=0.2)
-            ax2.plot(mean_p, color='blue', linewidth=2, label='Mean Path')
-            ax2.fill_between(range(sim_steps + 1), mean_p - 2*std_p, mean_p + 2*std_p, alpha=0.2, label='±2 Std Dev')
-            ax2.set_title(f"Simulated Compounded Amount over {sim_steps} Steps ({num_simulations} Sims)")
-            ax2.set_xlabel("Window Step"); ax2.set_ylabel("Amount ($)"); ax2.legend(); ax2.grid(True)
-            st.pyplot(fig2)
+    if run_sim:
+        ra = np.array(st.session_state["rolling_alphas"])
+        w = st.session_state["window"]
+        mu, sigma = ra.mean(), ra.std()
 
-            final_amt = mean_p[-1]; total_ret = (final_amt / initial - 1) * 100
-            st.metric("Mean Final Amount", f"${final_amt:.2f}")
-            st.metric("Mean Total Return", f"{total_ret:.2f}%")
+        paths = np.zeros((num_simulations, sim_steps + 1))
+        for i in range(num_simulations):
+            draws = np.random.normal(mu, sigma, sim_steps)
+            p = [initial]
+            for a in draws:
+                p.append(p[-1] * (1 + a) ** w)
+            paths[i] = p
 
+        mean_path = paths.mean(axis=0)
+        std_path = paths.std(axis=0)
+
+        # Plot
+        fig2, ax2 = plt.subplots(figsize=(12, 6))
+        for r in paths:
+            ax2.plot(r, color="gray", alpha=0.2)
+        ax2.plot(mean_path, color="blue", label="Mean Path", linewidth=2)
+        ax2.fill_between(range(sim_steps + 1),
+                         mean_path - 2 * std_path,
+                         mean_path + 2 * std_path,
+                         color="orange", alpha=0.2,
+                         label="±2 Std Dev")
+        ax2.set_title(f"Monte Carlo: {num_simulations} Sims, {sim_steps} Steps")
+        ax2.set_xlabel("Step"); ax2.set_ylabel("Amount ($)")
+        ax2.legend(); ax2.grid(True)
+        st.pyplot(fig2)
+
+        st.metric("Mean Final Amount", f"${mean_path[-1]:.2f}")
+        st.metric("Mean Total Return", f"{((mean_path[-1]/initial)-1)*100:.2f}%")
